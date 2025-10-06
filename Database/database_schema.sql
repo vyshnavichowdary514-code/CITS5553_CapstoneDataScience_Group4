@@ -1,3 +1,4 @@
+-- Edited from database branch for merge testing
 -- Enable PostGIS for GEOGRAPHY(Point,4326)
 CREATE EXTENSION IF NOT EXISTS postgis;
 
@@ -41,3 +42,4 @@ CREATE TABLE "References" (
     sample_id INT REFERENCES Sample(id) ON DELETE CASCADE,
     document_id INT REFERENCES Document(document_id) ON DELETE CASCADE
 );
+
