@@ -13,13 +13,14 @@ Python 3.9 or newer is required, along with the following libraries.
 - sqlalchemy
 - psycopg2-binary
 - pillow
+- python-dotenv
 
 These can be installed using:
 
-`pip install streamlit streamlit-folium folium sqlalchemy psycopg2-binary pandas pillow requests`
+`pip install streamlit streamlit-folium folium sqlalchemy psycopg2-binary pandas pillow requests python-dotenv`
 
 # Setup Instructions
-The current setup is configured for default localhost PostgreSQL databases. The setup can be found at the start of the code in map.py, and should be modified to connect to your hosted database.
+The connection to the PostgreSQL database can be configured by filling in the credentials and database server details in your local .env file in the format specified.
 
 After setting up, the app can be run with the following:
 
