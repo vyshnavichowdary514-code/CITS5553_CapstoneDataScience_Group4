@@ -3,229 +3,301 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from PIL import Image
 from pathlib import Path
 import xml.etree.ElementTree as ET
-import json
-import re
-import os
+import json, re, os, datetime
 from sem_meta import SEMMeta
+import fitz  # PyMuPDF
+import pandas as pd
 
 # ------------------ Helper Functions ------------------
 
-def strip_ns_key(key):
-    return key.split('}')[-1] if '}' in key else key
+image_path = ""
+image_path2 = ""
+meta_path2 = ""
+pdf_path = ""
+output_folder = ""
+
+def strip_ns_key(key): return key.split('}')[-1] if '}' in key else key
 
 def xml_to_dict(elem):
     children = list(elem)
     if not children:
-        text = elem.text.strip() if elem.text and elem.text.strip() else None
-        return text
-    result = {}
-    for child in children:
-        child_dict = xml_to_dict(child)
-        tag = strip_ns_key(child.tag)
-        if tag in result:
-            if not isinstance(result[tag], list):
-                result[tag] = [result[tag]]
-            result[tag].append(child_dict)
+        t = elem.text.strip() if elem.text and elem.text.strip() else None
+        return t
+    r = {}
+    for c in children:
+        d = xml_to_dict(c)
+        t = strip_ns_key(c.tag)
+        if t in r:
+            if not isinstance(r[t], list): r[t] = [r[t]]
+            r[t].append(d)
         else:
-            result[tag] = child_dict
-    return result
+            r[t] = d
+    return r
 
 def strip_ns(d):
-    if isinstance(d, dict):
-        return {strip_ns_key(k): strip_ns(v) for k, v in d.items()}
-    elif isinstance(d, list):
-        return [strip_ns(i) for i in d]
-    else:
-        return d
+    if isinstance(d, dict):  return {strip_ns_key(k): strip_ns(v) for k,v in d.items()}
+    if isinstance(d, list):  return [strip_ns(i) for i in d]
+    return d
 
-def parse_value(value):
-    if value is None:
-        return None
-    if isinstance(value, (tuple, list)):
-        return [parse_value(v) for v in value]
-    if isinstance(value, bytes):
+def parse_value(v):
+    if v is None: return None
+    if isinstance(v,(tuple,list)): return [parse_value(i) for i in v]
+    if isinstance(v,bytes):
+        try: v=v.decode("utf-8",errors="ignore")
+        except: return None
+    if isinstance(v,str):
         try:
-            value = value.decode("utf-8", errors="ignore")
-        except Exception:
-            return None
-    if isinstance(value, str):
-        try:
-            root = ET.fromstring(value)
-            return {strip_ns_key(root.tag): xml_to_dict(root)}
-        except ET.ParseError:
-            pass
-        if "=" in value:
-            kv = {}
-            for line in value.splitlines():
+            r=ET.fromstring(v)
+            return {strip_ns_key(r.tag):xml_to_dict(r)}
+        except ET.ParseError: pass
+        if "=" in v:
+            kv={}
+            for line in v.splitlines():
                 if "=" in line:
-                    key, val = line.split("=", 1)
-                    kv[key.strip()] = val.strip()
-            if kv:
-                return {"plain": kv}
-    try:
-        json.dumps(value)
-        return value
-    except Exception:
-        return None
+                    k,val=line.split("=",1)
+                    kv[k.strip()]=val.strip()
+            if kv: return {"plain":kv}
+    try: json.dumps(v); return v
+    except: return None
 
 def convert_meta_to_json(meta):
-    clean_meta = {}
-    for k, v in meta.items():
-        try:
-            parsed_value = parse_value(v)
-            clean_meta[str(k)] = strip_ns(parsed_value)
-        except Exception:
-            clean_meta[str(k)] = None
-    return clean_meta
+    c={}
+    for k,v in meta.items():
+        try: c[str(k)]=strip_ns(parse_value(v))
+        except: c[str(k)]=None
+    return c
 
 def parse_jeol_metadata(meta_path):
-    data = {}
+    d={}
     try:
-        with open(meta_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(meta_path,"r",encoding="utf-8",errors="ignore") as f:
             for line in f:
-                line = line.strip()
+                line=line.strip()
                 if line.startswith("$"):
-                    match = re.match(r"^\$+([A-Z0-9_%]+)\s*(.*)$", line)
-                    if match:
-                        key, val = match.groups()
-                        data[key.strip()] = val.strip()
+                    m=re.match(r"^\$+([A-Z0-9_%]+)\s*(.*)$",line)
+                    if m: k,v=m.groups(); d[k.strip()]=v.strip()
     except Exception as e:
-        data = {"Error": f"Failed to parse metadata: {e}"}
-    return data
+        d={"Error":f"Failed to parse metadata: {e}"}
+    return d
 
-# ------------------ Extraction Logic ------------------
+# ------------------ SEM Extraction ------------------
 
 def extract_from_image(image_path):
     with Image.open(image_path) as im:
-        meta, tags = SEMMeta.ImageMetadata(im)
-        json_meta = convert_meta_to_json(meta)
-        return {"image": Path(image_path).name, "metadata": json_meta}
+        meta,_=SEMMeta.ImageMetadata(im)
+        return {"image":Path(image_path).name,"metadata":convert_meta_to_json(meta)}
 
-def extract_from_image_and_text(image_path, meta_path):
-    meta_data = parse_jeol_metadata(meta_path)
-    base_name = Path(image_path).stem
-    machine_name = meta_data.get("CM_INSTRUMENT", "Unknown").strip()
-    date_taken = meta_data.get("CM_DATE", "Unknown").replace("/", "-")
-    unified_name = f"{base_name}_{machine_name}_{date_taken}"
-    return {
-        "id": base_name,
-        "image_file": f"{unified_name}.tif",
-        "metadata_file": f"{unified_name}.txt",
-        "machine": machine_name,
-        "date_taken": date_taken,
-        "metadata": meta_data
-    }
+def extract_from_image_and_text(image_path,meta_path):
+    m=parse_jeol_metadata(meta_path)
+    b=Path(image_path).stem
+    mach=m.get("CM_INSTRUMENT","Unknown").strip()
+    date=m.get("CM_DATE","Unknown").replace("/","-")
+    u=f"{b}_{mach}_{date}"
+    return {"id":b,"image_file":f"{u}.tif","metadata_file":f"{u}.txt",
+            "machine":mach,"date_taken":date,"metadata":m}
 
-# ------------------ GUI Functions ------------------
-
-def select_image():
-    global image_path
-    image_path = filedialog.askopenfilename(
-        title="Select SEM Image",
-        filetypes=[("SEM Images", "*.tif *.tiff *.bmp *.jpg *.jpeg *.png")]
-    )
-    if image_path:
-        entry_image.config(state="normal")
-        entry_image.delete(0, tk.END)
-        entry_image.insert(0, str(Path(image_path)))
-        entry_image.config(state="readonly")
-
-def select_metadata():
-    global meta_path
-    meta_path = filedialog.askopenfilename(
-        title="Select Metadata File (Optional)",
-        filetypes=[("Text files", "*.txt")]
-    )
-    if meta_path:
-        entry_meta.config(state="normal")
-        entry_meta.delete(0, tk.END)
-        entry_meta.insert(0, str(Path(meta_path)))
-        entry_meta.config(state="readonly")
-
-def extract_and_show():
-    if not image_path:
-        messagebox.showerror("Error", "Please select an image first.")
-        return
+def save_json(output_box, image_path):
+    text=output_box.get(1.0,tk.END).strip()
+    if not text: return messagebox.showwarning("No Data","Nothing to save.")
+    try: data=json.loads(text)
+    except: return messagebox.showerror("Error","Invalid JSON.")
+    base=Path(image_path).stem+"_metadata.json" if image_path else "metadata.json"
+    init_dir=str(Path(image_path).parent) if image_path else os.getcwd()
+    path=filedialog.asksaveasfilename(defaultextension=".json",
+        filetypes=[("JSON","*.json")],initialfile=base,initialdir=init_dir)
+    if not path: return
     try:
-        if meta_path:
-            output = extract_from_image_and_text(image_path, meta_path)
-        else:
-            output = extract_from_image(image_path)
-        output_box.delete(1.0, tk.END)
-        output_box.insert(tk.END, json.dumps(output, indent=2))
+        with open(path,"w",encoding="utf-8") as f: json.dump(data,f,indent=2)
+        messagebox.showinfo("Saved",f"Saved → {path}")
     except Exception as e:
-        messagebox.showerror("Error", f"Failed to extract metadata: {e}")
+        messagebox.showerror("Error",f"Failed to save:\n{e}")
 
-def clear_all():
-    """Reset everything for a new extraction."""
-    global image_path, meta_path
-    image_path = ""
-    meta_path = ""
-    entry_image.config(state="normal")
-    entry_image.delete(0, tk.END)
-    entry_image.config(state="readonly")
-    entry_meta.config(state="normal")
-    entry_meta.delete(0, tk.END)
-    entry_meta.config(state="readonly")
-    output_box.delete(1.0, tk.END)
+def clear_all(entries,box):
+    for e in entries:
+        e.config(state="normal"); e.delete(0,tk.END); e.config(state="readonly")
+    box.delete(1.0,tk.END)
 
-# ------------------ UI Layout ------------------
+# ------------------ PDF Extraction ------------------
+
+def extract_images_from_pdf(pdf_path, output_folder, output_box):
+    """Extract all images and metadata from PDF into auto-created subfolder."""
+    if not pdf_path:
+        return messagebox.showerror("Error", "Please select a PDF file first.")
+    if not output_folder:
+        return messagebox.showerror("Error", "Please select a base output folder.")
+
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    full_output_path = os.path.join(output_folder, f"Extracted_Images_{timestamp}")
+    os.makedirs(full_output_path, exist_ok=True)
+
+    try:
+        doc = fitz.open(pdf_path)
+        metadata_list = []
+
+        for page_index in range(len(doc)):
+            page = doc[page_index]
+            for img_index, img in enumerate(page.get_images(full=True)):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                image_ext = base_image["ext"]
+                width = base_image["width"]
+                height = base_image["height"]
+                colorspace = base_image["colorspace"]
+                bpc = base_image["bpc"]
+
+                image_filename = f"page{page_index+1}_img{img_index+1}.{image_ext}"
+                image_path = os.path.join(full_output_path, image_filename)
+
+                with open(image_path, "wb") as f:
+                    f.write(image_bytes)
+
+                metadata_list.append({
+                    "Page": page_index + 1,
+                    "Image Number": img_index + 1,
+                    "Filename": image_filename,
+                    "Width (px)": width,
+                    "Height (px)": height,
+                    "Extension": image_ext,
+                    "Color Space": colorspace,
+                    "Bits per Component": bpc,
+                    "File Path": image_path
+                })
+
+        df = pd.DataFrame(metadata_list)
+        excel_path = os.path.join(full_output_path, "image_metadata.xlsx")
+        df.to_excel(excel_path, index=False)
+
+        output_box.delete(1.0, tk.END)
+        output_box.insert(tk.END, f"✅ Extracted {len(metadata_list)} images\n")
+        output_box.insert(tk.END, f"📁 Saved in: {full_output_path}\n")
+        output_box.insert(tk.END, f"🧾 Metadata Excel: {excel_path}\n")
+
+        messagebox.showinfo("Success", f"Extracted {len(metadata_list)} images.\nSaved to:\n{full_output_path}")
+
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to extract images:\n{e}")
+
+# ------------------ GUI Layout ------------------
 
 root = tk.Tk()
-root.title("SEM Image Metadata Extractor (Enhanced)")
-root.geometry("1050x780")
+root.title("SEM + PDF Metadata Extractor")
+root.geometry("1080x820")
 root.configure(bg="#EAF0FB")
+style = ttk.Style(); style.theme_use("clam")
 
-# Initialize global paths
-image_path = ""
-meta_path = ""
-
-style = ttk.Style()
-style.theme_use("clam")
-
-# Header
 header = tk.Frame(root, bg="#4A90E2", height=70)
 header.pack(fill="x")
-tk.Label(header, text="SEM Image Metadata Extractor",
+tk.Label(header, text="SEM & PDF Image Metadata Extractor",
          font=("Helvetica", 22, "bold"), fg="white", bg="#4A90E2").pack(pady=15)
 
-frame = tk.Frame(root, bg="#EAF0FB")
-frame.pack(pady=20)
+# Notebook (Tabs)
+notebook = ttk.Notebook(root)
+notebook.pack(padx=10, pady=10, fill="x")
 
-# Image Input
-ttk.Label(frame, text="Select SEM Image:", font=("Helvetica", 12, "bold"), background="#EAF0FB").grid(row=0, column=0, padx=10, sticky="e")
-entry_image = tk.Entry(frame, width=70, font=("Arial", 11), bg="#FFF8DC", fg="#000000", relief="solid", bd=1)
-entry_image.grid(row=0, column=1, padx=10)
-entry_image.configure(state="readonly")
-tk.Button(frame, text="📂 Browse", command=select_image, bg="#AED6F1", fg="black", font=("Helvetica", 10, "bold")).grid(row=0, column=2, padx=5)
+# --- Tabs ---
+tab1 = tk.Frame(notebook, bg="#EAF0FB")
+tab2 = tk.Frame(notebook, bg="#EAF0FB")
+tab3 = tk.Frame(notebook, bg="#EAF0FB")
+notebook.add(tab1, text="🖼 Image Only")
+notebook.add(tab2, text="🧾 Image + Metadata File")
+notebook.add(tab3, text="📘 PDF Image Extractor")
 
-# Metadata Input
-ttk.Label(frame, text="Select Metadata File:", font=("Helvetica", 12, "bold"), background="#EAF0FB").grid(row=1, column=0, padx=10, sticky="e")
-entry_meta = tk.Entry(frame, width=70, font=("Arial", 11), bg="#FDEBD0", fg="#000000", relief="solid", bd=1)
-entry_meta.grid(row=1, column=1, padx=10)
-entry_meta.configure(state="readonly")
-tk.Button(frame, text="📁 Browse", command=select_metadata, bg="#F5B7B1", fg="black", font=("Helvetica", 10, "bold")).grid(row=1, column=2, padx=5)
-
-# Buttons Frame
-btn_frame = tk.Frame(root, bg="#EAF0FB")
-btn_frame.pack(pady=15)
-
-extract_btn = tk.Button(btn_frame, text="Extract & Show JSON", command=extract_and_show,
-                        bg="#90EE90", fg="black", font=("Helvetica", 13, "bold"),
-                        relief="raised", width=22, height=2, cursor="hand2", activebackground="#7CFC00")
-
-clear_btn = tk.Button(btn_frame, text="Clear All", command=clear_all,
-                      bg="#FFA07A", fg="black", font=("Helvetica", 13, "bold"),
-                      relief="raised", width=15, height=2, cursor="hand2", activebackground="#FA8072")
-
-extract_btn.grid(row=0, column=0, padx=15)
-clear_btn.grid(row=0, column=1, padx=15)
-
-# Output Box
+# Shared Output
 output_box = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=120, height=25,
-                                       bg="#1E1E1E", fg="#00FF7F",
-                                       insertbackground="white", relief="solid", bd=2,
-                                       font=("Consolas", 11))
+    bg="#1E1E1E", fg="#00FF7F", insertbackground="white", relief="solid", bd=2,
+    font=("Consolas", 11))
 output_box.pack(padx=20, pady=10, fill=tk.BOTH, expand=True)
+
+# Clear output when tab changes
+def on_tab_change(event):
+    output_box.delete(1.0, tk.END)
+notebook.bind("<<NotebookTabChanged>>", on_tab_change)
+
+# ------------------ Tab 1: Image Only ------------------
+
+tk.Label(tab1, text="Select SEM Image:", bg="#EAF0FB", font=("Helvetica", 12, "bold")).grid(row=0, column=0, padx=10, sticky="e")
+entry_img1 = tk.Entry(tab1, width=70, font=("Arial", 11), bg="#FFF8DC", relief="solid", bd=1, state="readonly")
+entry_img1.grid(row=0, column=1, padx=10)
+
+def browse_img1():
+    global image_path
+    image_path = filedialog.askopenfilename(title="Select SEM Image",
+        filetypes=[("SEM Images", "*.tif *.tiff *.bmp *.jpg *.jpeg *.png")])
+    if image_path:
+        entry_img1.config(state="normal"); entry_img1.delete(0, tk.END)
+        entry_img1.insert(0, image_path); entry_img1.config(state="readonly")
+
+tk.Button(tab1, text="📂 Browse", command=browse_img1, bg="#AED6F1", font=("Helvetica", 10, "bold")).grid(row=0, column=2, padx=5)
+
+ttk.Button(tab1, text="Extract & Show", command=lambda: (
+    output_box.delete(1.0, tk.END),
+    output_box.insert(tk.END, json.dumps(extract_from_image(image_path), indent=2)) if image_path else messagebox.showerror("Error","Select an image first.")
+)).grid(row=1, column=0, padx=10, pady=10)
+ttk.Button(tab1, text="Save JSON", command=lambda: save_json(output_box, image_path)).grid(row=1, column=1, padx=10)
+ttk.Button(tab1, text="Clear", command=lambda: clear_all([entry_img1], output_box)).grid(row=1, column=2, padx=10)
+
+# ------------------ Tab 2: Image + Metadata ------------------
+
+tk.Label(tab2, text="Select SEM Image:", bg="#EAF0FB", font=("Helvetica", 12, "bold")).grid(row=0, column=0, padx=10, sticky="e")
+entry_img2 = tk.Entry(tab2, width=70, font=("Arial", 11), bg="#FFF8DC", relief="solid", bd=1, state="readonly")
+entry_img2.grid(row=0, column=1, padx=10)
+
+tk.Label(tab2, text="Select Metadata File:", bg="#EAF0FB", font=("Helvetica", 12, "bold")).grid(row=1, column=0, padx=10, sticky="e")
+entry_meta2 = tk.Entry(tab2, width=70, font=("Arial", 11), bg="#FDEBD0", relief="solid", bd=1, state="readonly")
+entry_meta2.grid(row=1, column=1, padx=10)
+
+def browse_img2():
+    global image_path2
+    image_path2 = filedialog.askopenfilename(title="Select SEM Image", filetypes=[("SEM Images", "*.tif *.tiff *.bmp *.jpg *.jpeg *.png")])
+    if image_path2:
+        entry_img2.config(state="normal"); entry_img2.delete(0, tk.END)
+        entry_img2.insert(0, image_path2); entry_img2.config(state="readonly")
+
+def browse_meta2():
+    global meta_path2
+    meta_path2 = filedialog.askopenfilename(title="Select Metadata File", filetypes=[("Text files", "*.txt")])
+    if meta_path2:
+        entry_meta2.config(state="normal"); entry_meta2.delete(0, tk.END)
+        entry_meta2.insert(0, meta_path2); entry_meta2.config(state="readonly")
+
+tk.Button(tab2, text="📂 Browse", command=browse_img2, bg="#AED6F1", font=("Helvetica", 10, "bold")).grid(row=0, column=2, padx=5)
+tk.Button(tab2, text="📁 Browse", command=browse_meta2, bg="#F5B7B1", font=("Helvetica", 10, "bold")).grid(row=1, column=2, padx=5)
+
+ttk.Button(tab2, text="Extract & Show", command=lambda: (
+    output_box.delete(1.0, tk.END),
+    output_box.insert(tk.END, json.dumps(extract_from_image_and_text(image_path2, meta_path2), indent=2)) if (image_path2 and meta_path2) else messagebox.showerror("Error","Select both image and metadata file.")
+)).grid(row=2, column=0, padx=10, pady=10)
+ttk.Button(tab2, text="Save JSON", command=lambda: save_json(output_box, globals().get("image_path2",""))).grid(row=2, column=1, padx=10)
+ttk.Button(tab2, text="Clear", command=lambda: clear_all([entry_img2, entry_meta2], output_box)).grid(row=2, column=2, padx=10)
+
+# ------------------ Tab 3: PDF Extractor ------------------
+
+tk.Label(tab3, text="Select PDF File:", bg="#EAF0FB", font=("Helvetica", 12, "bold")).grid(row=0, column=0, padx=10, sticky="e")
+entry_pdf = tk.Entry(tab3, width=70, font=("Arial", 11), bg="#E8F8F5", relief="solid", bd=1, state="readonly")
+entry_pdf.grid(row=0, column=1, padx=10)
+
+tk.Label(tab3, text="Select Base Output Folder:", bg="#EAF0FB", font=("Helvetica", 12, "bold")).grid(row=1, column=0, padx=10, sticky="e")
+entry_output = tk.Entry(tab3, width=70, font=("Arial", 11), bg="#FDEBD0", relief="solid", bd=1, state="readonly")
+entry_output.grid(row=1, column=1, padx=10)
+
+def browse_pdf():
+    global pdf_path
+    pdf_path = filedialog.askopenfilename(title="Select PDF File", filetypes=[("PDF files", "*.pdf")])
+    if pdf_path:
+        entry_pdf.config(state="normal"); entry_pdf.delete(0, tk.END)
+        entry_pdf.insert(0, pdf_path); entry_pdf.config(state="readonly")
+
+def browse_output_folder():
+    global output_folder
+    output_folder = filedialog.askdirectory(title="Select Output Folder")
+    if output_folder:
+        entry_output.config(state="normal"); entry_output.delete(0, tk.END)
+        entry_output.insert(0, output_folder); entry_output.config(state="readonly")
+
+tk.Button(tab3, text="📘 Browse PDF", command=browse_pdf, bg="#AED6F1", font=("Helvetica", 10, "bold")).grid(row=0, column=2, padx=5)
+tk.Button(tab3, text="📂 Choose Folder", command=browse_output_folder, bg="#F5B7B1", font=("Helvetica", 10, "bold")).grid(row=1, column=2, padx=5)
+ttk.Button(tab3, text="Extract Images + Metadata", command=lambda: extract_images_from_pdf(pdf_path, output_folder, output_box)).grid(row=2, column=1, pady=15)
+ttk.Button(tab3, text="Clear", command=lambda: clear_all([entry_pdf, entry_output], output_box)).grid(row=2, column=2, padx=10)
 
 root.mainloop()
